@@ -7,3 +7,5 @@ archive.py
 scratch.py
 Plotter.py
 simulation_parameters.csv
+venv/bin venv/include venv/lib venv/pyvenv.cfg venv/src
+venv/

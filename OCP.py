@@ -4,21 +4,23 @@ from helper_functions import gradient_func, jacobian_func
 
 class OCP:
 
-    def __init__(self, n_horizon, state_lag, input_lag, disturbance_lag, t_step, imp_bounds_only=True, model_type='discrete'):
+    def __init__(self, n_horizon, state_lag, input_lag, disturbance_lag, output_lag, mpc_t_step, model,
+                 imp_bounds_only=True, model_type='discrete'):
 
         # horizon length
         self.n_horizon = n_horizon
+        self.true_disturbances = None
 
         # stage cost, terminal cost and dynamic state functions
         self.stage_cost_func = None
         self.terminal_cost_func = None
         self.next_state_funcs = None
-        self.state_ineq_func = None
+        self.stage_ineq_func = None
 
         self.stage_cost_jacobian = None
         self.terminal_cost_jacobian = None
         self.next_state_jacobians = None
-        self.state_ineq_jacobian = None
+        self.stage_ineq_jacobian = None
 
         # all constraints
         self.constraints = []
@@ -35,49 +37,64 @@ class OCP:
         self.parameters = {}
         self.n_stage_vars = 0
         self.n_total_vars = 0
+        self.n_optimization_vars = 0
         self.n_states = 0
         self.n_inputs = 0
         self.n_disturbances = 0
+        self.n_outputs = 0
+        self.n_xustage_vars = 0
 
         # the indices of the mpc primal variables which correspond to the current state at each time step
-        self.current_state_indices = None
+        self.x_stage_indices = None
         # the indices of the mpc primal variables which correspond to the current input at each time step
-        self.current_input_indices = None
+        self.u_stage_indices = None
         # the indices of the mpc primal variables which correspond to the current disturbance at each time step
-        self.current_disturbance_indices = None
+        self.w_stage_indices = None
+        self.y_stage_indices = None
+        self.z_stage_indices = None
         # the indices of the mpc primal variables which correspond to the next state at each time step
         self.next_state_indices = None
+        self.next_state_fullvar_indices = None
         # the indices of the mpc primal variables which correspond to the lagged states required at each time step
-        self.lagged_state_indices = None
+        self.x_lagged_indices = None
         # the indices of the mpc primal variables which correspond to the lagged inputs required at each time step
-        self.lagged_input_indices = None
+        self.u_lagged_indices = None
         # the indices of the mpc primal variables which correspond to the lagged disturbance required at each time step
-        self.lagged_disturbance_indices = None
+        self.w_lagged_indices = None
+        self.y_lagged_indices = None
+
+        self.xustage_opt_indices = None
+        self.xustage_full_indices = None
+        self.xterm_opt_indices = None
 
         # indices corresponding to the stage cost input variables from optimization variables z
-        self.stage_cost_input_indices = None
+        self.stage_cost_fullvar_indices = None
         # indices corresponding to the optimization variables from the stage cost jacobian
         self.stage_cost_optvar_indices = None
         # indices corresponding to the state inequality input from optimization variables z
-        self.state_ineq_input_indices = None
+        self.stage_ineq_fullvar_indices = None
         # indices corresponding to the optimization variables from the state inequality jacobian
-        self.state_ineq_optvar_indices = None
+        self.stage_ineq_optvar_indices = None
         # indices corresponding to the next state equality input from optimization variables z
-        self.next_state_eq_input_indices = None
+        self.next_state_eq_fullvar_indices = None
         # indices corresponding to the optimization variables from the next state equality jacobian
         self.next_state_eq_optvar_indices = None
 
         self.state_lag = state_lag
         self.input_lag = input_lag
         self.disturbance_lag = disturbance_lag
+        self.output_lag = output_lag
 
-        # self.current_states = None
-        # self.current_inputs = None
+        # self.x_stage = None
+        # self.u_stage = None
 
-        self.previous_lagged_states = None
-        self.previous_lagged_inputs = None
-        self.previous_lagged_disturbances = None
+        self.previous_x_lagged = None
+        self.previous_u_lagged = None
+        self.previous_w_lagged = None
+        self.previous_y_lagged = None
+
         self.disturbances = None
+        self.outputs = None
         self.init_state = None
         self.init_input = None
         self.init_disturbance = None
@@ -90,183 +107,218 @@ class OCP:
         self.n_exp_ineq_constraints = 0
         self.n_exp_eq_constraints = 0
 
-        # self.n_imp_ineq_constraints = 0
-        # self.n_imp_eq_constraints = 0
-
         self.model_type = model_type
-        self.t_step = t_step
+        self.mpc_t_step = mpc_t_step
+
+        self.set_opt_vars(model.n_states, model.n_inputs, model.n_disturbances, model.n_outputs)
+        self.set_params(model.parameters)
+        self.set_stage_ineq_func(model.stage_ineq_constraint_func)
+        self.set_imp_bounds(model.stage_bounds, model.term_bounds)
 
     ####################################################################################################################
     # VARIABLES & PARAMETERS
 
-    def set_opt_vars(self, n_states, n_inputs, n_disturbances):
+    def set_opt_vars(self, n_states, n_inputs, n_disturbances, n_outputs):
 
         self.n_states = n_states
         self.n_inputs = n_inputs
         self.n_disturbances = n_disturbances
-        self.n_stage_vars = self.n_states + self.n_inputs
-        self.n_total_vars = self.n_stage_vars * self.n_horizon
+        self.n_outputs = n_outputs
+        self.n_stage_vars = self.n_states + self.n_inputs + self.n_disturbances
+        self.n_xustage_vars = self.n_states + self.n_inputs
+        self.n_total_vars = (self.n_stage_vars * self.n_horizon) + self.n_states
+        self.n_optimization_vars = (self.n_states + self.n_inputs) * self.n_horizon
 
-        self.current_input_indices = np.array([range(k * self.n_stage_vars, (k * self.n_stage_vars) + self.n_inputs)
-                                               for k in range(self.n_horizon)])
+        # indices in z_tau:[u0, x1, u1, s2, ..., xN] corresponding to xk, k neq N
+        # a negative index refers to x0
+        self.x_stage_indices = np.array([range((k * self.n_xustage_vars) - self.n_states, (k * self.n_xustage_vars))
+                                         for k in range(self.n_horizon)])
 
-        self.current_state_indices = np.array([range((k * self.n_stage_vars) - self.n_states, k * self.n_stage_vars)
-                                               for k in range(self.n_horizon)])
+        # indices in z_tau:[u0, x1, u1, s2, ..., xN] corresponding to uk
+        self.u_stage_indices = np.array([range(k * self.n_xustage_vars, (k * self.n_xustage_vars) + self.n_inputs)
+                                         for k in range(self.n_horizon)])
 
-        self.current_disturbance_indices = np.array([range(k * self.n_disturbances, (k + 1) * self.n_disturbances)
-                                                     for k in range(self.n_horizon)])
+        # indices in true_disturbances: w0 w1 ... wn-1 corresponding to wk
+        self.w_stage_indices = np.array([range(k * self.n_disturbances, (k + 1) * self.n_disturbances)
+                                         for k in range(self.n_horizon)])
 
-        self.lagged_state_indices = np.zeros((self.n_horizon, self.state_lag + 1, self.n_states))
-        self.lagged_input_indices = np.zeros((self.n_horizon, self.input_lag + 1, self.n_inputs))
-        self.lagged_disturbance_indices = np.zeros((self.n_horizon, self.disturbance_lag + 1, self.n_disturbances))
+        # indices in z:[x0, u0, w0, w1, u1, w1, ..., xN] corresponding to zk, k neq N
+        # self.z_stage_indices = np.array([np.hstack([self.x_stage_indices[k], self.u_stage_indices[k],
+        #                                            self.w_stage_indices[k]]) for k in range(self.n_horizon)])
+
+        # indices in z:[x0, u0, w0, w1, u1, w1, ..., xN] corresponding to x_lagged, u_lagged, w_lagged
+        # where x_lagged: [x_most_lagged ... x_least_lagged, x_now]
+        self.x_lagged_indices = np.zeros((self.n_horizon, self.state_lag + 1, self.n_states))
+        self.u_lagged_indices = np.zeros((self.n_horizon, self.input_lag + 1, self.n_inputs))
+        self.w_lagged_indices = np.zeros((self.n_horizon, self.disturbance_lag + 1, self.n_disturbances))
 
         for k in range(self.n_horizon):
 
             for l in range(self.state_lag + 1):
-                indices = self.current_state_indices[k] - ((self.state_lag - l) * self.n_stage_vars)
-                self.lagged_state_indices[k, l, :] = indices
+                indices = self.x_stage_indices[k] - ((self.state_lag - l) * self.n_xustage_vars)
+                self.x_lagged_indices[k, l, :] = indices
 
             for l in range(self.input_lag + 1):
-                indices = self.current_input_indices[k] - ((self.input_lag - l) * self.n_stage_vars)
-                self.lagged_input_indices[k, l, :] = indices
+                indices = self.u_stage_indices[k] - ((self.input_lag - l) * self.n_xustage_vars)
+                self.u_lagged_indices[k, l, :] = indices
 
             for l in range(self.disturbance_lag + 1):
-                indices = self.current_disturbance_indices[k] - ((self.disturbance_lag - l) * self.n_disturbances)
-                self.lagged_disturbance_indices[k, l, :] = indices
+                indices = self.w_stage_indices[k] - ((self.disturbance_lag - l) * self.n_disturbances)
+                self.w_lagged_indices[k, l, :] = indices
 
-        self.lagged_state_indices = np.array(self.lagged_state_indices, dtype='int')
-        self.lagged_input_indices = np.array(self.lagged_input_indices, dtype='int')
-        self.lagged_disturbance_indices = np.array(self.lagged_disturbance_indices, dtype='int')
+        self.x_lagged_indices = np.array(self.x_lagged_indices, dtype='int')
+        self.u_lagged_indices = np.array(self.u_lagged_indices, dtype='int')
+        self.w_lagged_indices = np.array(self.w_lagged_indices, dtype='int')
 
-        self.next_state_indices = self.current_state_indices + self.n_stage_vars
-
-        self.stage_cost_input_indices = np.hstack([self.current_state_indices, self.current_input_indices])
-        self.stage_cost_optvar_indices = [np.where(self.stage_cost_input_indices[k] >= 0)[0] for k in range(self.n_horizon)]
-        # remove all variables from before this horizon
-        self.stage_cost_input_indices = [self.stage_cost_input_indices[k][self.stage_cost_input_indices[k] >= 0]
-                                         for k in range(self.n_horizon)]
-
-        self.state_ineq_input_indices = np.vstack([self.current_state_indices, self.next_state_indices[-1]])
-        self.state_ineq_optvar_indices = np.where(self.state_ineq_input_indices.flatten() >= 0)[0]
-
-        # remove all variables from before this horizon
-        self.state_ineq_input_indices = self.state_ineq_input_indices[self.state_ineq_input_indices >= 0]
+        # indices in z:[x0, u0, w0, w1, u1, w1, ..., xN] corresponding to xk+1
+        self.next_state_indices = self.x_stage_indices + self.n_xustage_vars
+        self.next_state_fullvar_indices = [np.arange((k + 1) * self.n_stage_vars,
+                                                     (k + 1) * self.n_stage_vars + self.n_states)
+                                           for k in range(self.n_horizon)]
         
-        self.next_state_eq_input_indices = np.vstack([
-            np.hstack([self.lagged_state_indices[k], self.lagged_input_indices[k]]) for k in range(self.n_horizon)])
+        # z_tau: [u0 x1 u1 x2 u2 --- xN] -> z: [u0 x0 u0 w0 x1 u1 w1 --- xN]
+        
+        # indices in z_tau: [u0 x1 u1 x2 u2 --- xN] corresponding to [u0 x1 u1 x2 u2 ... x_n-1 u_n-1]
+        self.xustage_opt_indices = [np.arange(self.n_inputs)] + \
+                                   [np.arange(self.n_inputs + k * (self.n_states + self.n_inputs),
+                                                         self.n_inputs + (k + 1) * (self.n_states + self.n_inputs))
+                                               for k in range(self.n_horizon - 1)]
 
-        self.next_state_eq_optvar_indices = [np.where(self.next_state_eq_input_indices[k] >= 0)[0]
-                                                       for k in range(self.n_horizon)]
+        self.xterm_opt_indices = np.arange(self.n_optimization_vars - self.n_states, self.n_optimization_vars)
+        
+        # indices in z:[x0_lagged, u0_lagged, w0_lagged, x1_lagged, u1_lagged, w1_lagged, ..., xN_lagged]
+        # corresponding to [u0 x1 u1 x2 u2 ... x_n-1 u_n-1]
 
-        # remove all variables from before this horizon
-        self.next_state_eq_input_indices = [self.next_state_eq_input_indices[k][self.next_state_eq_input_indices[k] >= 0]
-                                            for k in range(self.n_horizon)]
+        n_lagged_states = self.n_states * (self.state_lag + 1)
 
-        # remove disturbance indices from input indices
-        for k in range(self.n_horizon):
-            for i in self.next_state_eq_input_indices[k]:
-                if i in self.current_disturbance_indices or i < 0:
-                    self.next_state_eq_input_indices[k].remove(i)
+        self.xustage_full_indices = [np.arange(self.n_inputs) + n_lagged_states] + \
+            [np.hstack([np.arange(self.n_states), np.arange(self.n_inputs) + n_lagged_states])
+             for k in range(self.n_horizon - 1)]
+        
+        
+        # self.stage_cost_fullvar_indices = np.hstack([self.x_stage_indices, self.u_stage_indices, self.w_stage_indices])
+        # self.stage_cost_optvar_indices = [np.where(self.stage_cost_fullvar_indices[k] >= 0)[0] for k in
+        #                                    range(self.n_horizon)]
+        #
+        # # remove all variables from before this horizon
+        # self.stage_cost_fullvar_indices = [self.stage_cost_fullvar_indices[k][self.stage_cost_fullvar_indices[k] >= 0]
+        #                                  for k in range(self.n_horizon)]
+        #
+        # self.stage_ineq_fullvar_indices = np.vstack([np.hstack([self.x_stage_indices, self.u_stage_indices])])
+        # self.stage_ineq_optvar_indices = np.where(self.stage_ineq_fullvar_indices.flatten() >= 0)[0]
+        #
+        # # remove all variables from before this horizon
+        # self.stage_ineq_fullvar_indices = self.stage_ineq_fullvar_indices[self.stage_ineq_fullvar_indices >= 0]
+        #
+        # self.next_state_eq_fullvar_indices = np.vstack([
+        #     np.hstack([self.x_lagged_indices[k], self.u_lagged_indices[k]]) for k in range(self.n_horizon)])
+        #
+        # self.next_state_eq_optvar_indices = [np.where(self.next_state_eq_fullvar_indices[k] >= 0)[0]
+        #                                      for k in range(self.n_horizon)]
+        #
+        # # remove all variables from before this horizon
+        # self.next_state_eq_fullvar_indices = [self.next_state_eq_fullvar_indices[k][
+        #                                         self.next_state_eq_fullvar_indices[k] >= 0]
+        #                                     for k in range(self.n_horizon)]
+        #
+        # # remove disturbance indices from input indices
+        # for k in range(self.n_horizon):
+        #     for idx, i in enumerate(self.next_state_eq_fullvar_indices[k]):
+        #         if i in self.w_stage_indices or i < 0:
+        #             self.next_state_eq_fullvar_indices[k] = np.delete(self.next_state_eq_fullvar_indices[k], idx)
 
     def set_params(self, parameters):
         self.parameters = parameters
 
-    def set_lagged_vars(self, lagged_states, lagged_inputs, lagged_disturbances):
+    def set_lagged_vars(self, x_lagged, u_lagged, w_lagged):
 
-        self.previous_lagged_states = np.array([None for i in range(self.n_total_vars)])
-        self.previous_lagged_inputs = np.array([None for i in range(self.n_total_vars)])
-        self.previous_lagged_disturbances = np.array([None for i in range(self.n_total_vars)])
+        self.previous_x_lagged = np.array([None for i in range(self.n_total_vars)])
+        self.previous_u_lagged = np.array([None for i in range(self.n_total_vars)])
+        self.previous_w_lagged = np.array([None for i in range(self.n_total_vars)])
 
         for k in range(self.n_horizon):
             idx = 0
-            for i in self.lagged_state_indices[k]:
-
-                if np.all(i < 0) and self.previous_lagged_states[i][0] is None:
-                    self.previous_lagged_states[i] = lagged_states[idx * self.n_states:(idx + 1) * self.n_states]
+            for i in self.x_lagged_indices[k]:
+                if np.all(i < 0) and self.previous_x_lagged[i][0] is None:
+                    self.previous_x_lagged[i] = x_lagged[idx * self.n_states:(idx + 1) * self.n_states]
                     idx += 1
             idx = 0
-            for i in self.lagged_input_indices[k]:
-                if np.all(i < 0) and self.previous_lagged_inputs[i][0] is None:
-                    self.previous_lagged_inputs[i] = lagged_inputs[idx * self.n_inputs:(idx + 1) * self.n_inputs]
+            for i in self.u_lagged_indices[k]:
+                if np.all(i < 0) and self.previous_u_lagged[i][0] is None:
+                    self.previous_u_lagged[i] = u_lagged[idx * self.n_inputs:(idx + 1) * self.n_inputs]
                     idx += 1
 
             if self.n_disturbances:
                 idx = 0
-                for i in self.lagged_disturbance_indices[k]:
-                    if np.all(i < 0) and self.previous_lagged_disturbances[i][0] is None:
-                        self.previous_lagged_disturbances[i] = \
-                            lagged_disturbances[idx * self.n_disturbances:(idx + 1) * self.n_disturbances]
+                for i in self.w_lagged_indices[k]:
+                    if np.all(i < 0) and self.previous_w_lagged[i][0] is None:
+                        self.previous_w_lagged[i] = \
+                            w_lagged[idx * self.n_disturbances:(idx + 1) * self.n_disturbances]
                         idx += 1
 
         return
 
-    def current_states(self, z, k):
+    def x_stage(self, z_tau, k):
         # if the requested states is included in the optimization variables i.e. x1, x2 ... xN
-        if (self.current_state_indices[k] >= 0).all():
+        if (self.x_stage_indices[k] >= 0).all():
             # return current state
-            return z[self.current_state_indices[k]]
+            return z_tau[self.x_stage_indices[k]]
         # else if the requested states are not included in the optimization variables i.e. x0
         else:
             # return most recent lagged state
-            return self.previous_lagged_states[self.current_state_indices[k]]
+            return self.previous_x_lagged[self.x_stage_indices[k]]
 
-    def current_inputs(self, z, k):
-        if (self.current_input_indices[k] >= 0).all():
-            return z[self.current_input_indices[k]]
-        else:
-            return self.previous_lagged_inputs[self.current_state_indices[k]]
+    def u_stage(self, z_tau, k):
+        return z_tau[self.u_stage_indices[k]]
 
-    def current_disturbances(self, z, k):
+    def w_stage(self, k):
         if self.n_disturbances:
-            if (self.current_disturbance_indices[k] >= 0).all():
-                return z[self.current_disturbance_indices[k]]
-            else:
-                return self.previous_lagged_disturbances[self.current_disturbance_indices[k]]
+            return self.true_disturbances[self.w_stage_indices[k]]
         else:
             return np.array([])
 
-    def next_states(self, z, k):
-        return z[self.next_state_indices[k]]
+    def next_states(self, z_tau, k):
+        return z_tau[self.next_state_indices[k]]
 
-    def lagged_states(self, z, k):
-        lagged_states = []
+    def x_lagged(self, z_tau, k):
+        x_lagged = []
         # for each lagged state required
-        for i in self.lagged_state_indices[k]:
+        for i in self.x_lagged_indices[k]:
             # if they occurred during this time period of this mpc run
             if (i >= 0).all():
-                lagged_states.append(z[i])
+                x_lagged.append(z_tau[i])
             # else if they occurred before this mpc run
             else:
-                lagged_states.append(self.previous_lagged_states[i])
+                x_lagged.append(self.previous_x_lagged[i])
 
-        return np.concatenate(lagged_states)
+        return np.concatenate(x_lagged)
 
-    def lagged_inputs(self, z, k):
-        lagged_inputs = []
+    def u_lagged(self, z_tau, k):
+        u_lagged = []
         # for each lagged state required
-        for i in self.lagged_input_indices[k]:
+        for i in self.u_lagged_indices[k]:
             # if they occurred during this time period of this mpc run
             if (i >= 0).all():
-                lagged_inputs.append(z[i])
+                u_lagged.append(z_tau[i])
             # else if they occurred before this mpc run
             else:
-                lagged_inputs.append(self.previous_lagged_inputs[i])
+                u_lagged.append(self.previous_u_lagged[i])
 
-        return np.concatenate(lagged_inputs)
+        return np.concatenate(u_lagged)
 
-    def lagged_disturbances(self, z, k):
-        lagged_disturbances = []
+    def w_lagged(self, k):
+        w_lagged = []
         if self.n_disturbances:
-            for i in self.lagged_disturbance_indices[k]:
+            for i in self.w_lagged_indices[k]:
                 # if they occurred during this time period of this mpc run
                 if (i >= 0).all():
-                    lagged_disturbances.append(z[i])
+                    w_lagged.append(self.true_disturbances[i])
                 # else if they occurred before this mpc run
                 else:
-                    lagged_disturbances.append(self.previous_lagged_disturbances[i])
-            return np.concatenate(lagged_disturbances)
+                    w_lagged.append(self.previous_w_lagged[i])
+            return np.concatenate(w_lagged)
         else:
-            return np.array(lagged_disturbances)
+            return np.array(w_lagged)
 
     ####################################################################################################################
     # COST FUNCTION
@@ -282,75 +334,74 @@ class OCP:
         # single function, so jacobian = [gradient]
         self.terminal_cost_jacobian = terminal_cost_jacobian
 
-    def horizon_cost(self, z):
+    def horizon_cost(self, z_tau, k0=0):
         stage_cost = 0
         for k in range(self.n_horizon):
-            z_stage = np.hstack([self.current_states(z, k), self.current_inputs(z, k)])
-            stage_cost += self.stage_cost_func(z_stage)
+            z_stage = np.hstack([self.x_stage(z_tau, k), self.u_stage(z_tau, k), self.w_stage(k)])
+            stage_cost += self.stage_cost_func(z_stage, k0 + k)
 
-        x_term = self.next_states(z, -1)
-        term_cost = self.terminal_cost_func(x_term)
+        x_term = self.next_states(z_tau, -1)
+        term_cost = self.terminal_cost_func(x_term, k0 + k)
 
         return float(stage_cost + term_cost)
 
-    def horizon_cost_jacobian(self, z):
+    def horizon_cost_jacobian(self, z_tau, k0=0):
+        # given the current iteration of primal optvars: [u0, x1, u1 ... xN], this function returns the
+        # gradient of the horizon cost wrt to the optvars
 
-        jacobian = np.zeros((1, self.n_total_vars))
+        optvar_jacobian = np.zeros((1, self.n_optimization_vars))
+        
         for k in range(self.n_horizon):
-            z_stage = np.hstack([self.current_states(z, k), self.current_inputs(z, k)])
+            z_stage = np.hstack([self.x_stage(z_tau, k), self.u_stage(z_tau, k), self.w_stage(k)])
 
             # indices in the horizon optimization variables z
-            input_idx = self.stage_cost_input_indices[k]
-            optvar_idx = self.stage_cost_optvar_indices[k]
+            optvar_idx = self.xustage_opt_indices[k] 
+            fullvar_idx = self.xustage_full_indices[k]
 
             # gradient of cost as function of current states and inputs
-            # TODO DOUBLE CHECK GP GRADIENT FUNCTION, PRODUCING NONZERO VALUES
-            # TODO DOULBLE CHECK DYNAMIC EQUATIONS, PENDULUM SHOULD NOT BE SWINGING ON ITS OWN
-            #  should be theta * [0, 2, 0, 0, 2, 0, 0, 2, 0]
-            jac = self.stage_cost_jacobian(z_stage)
+            fullvar_jacobian = self.stage_cost_jacobian(z_stage, k0 + k)
+            
+            # update the columns of the jacobian corresponding the this stage's variables
+            optvar_jacobian[:, optvar_idx] = optvar_jacobian[:, optvar_idx] + fullvar_jacobian[:, fullvar_idx]
 
-            jacobian[:, input_idx] = jacobian[:, input_idx] + jac[:, optvar_idx]
+        x_term = self.next_states(z_tau, -1)
+        fullvar_jacobian = self.terminal_cost_jacobian(x_term, k0 + k)
+        optvar_idx = self.xterm_opt_indices
+        optvar_jacobian[:, optvar_idx] = optvar_jacobian[:, optvar_idx] + fullvar_jacobian
 
-        x_term = self.next_states(z, -1)
-        jac = self.terminal_cost_jacobian(x_term)
-        input_idx = self.next_state_indices[-1]
-        jacobian[:, input_idx] = jacobian[:, input_idx] + jac
-
-        return jacobian
+        return optvar_jacobian
 
     ####################################################################################################################
     # STATE INEQUALITY CONSTRAINTS
 
-    def set_state_ineq_func(self, state_ineq_func):
-        self.state_ineq_func = state_ineq_func
+    def set_stage_ineq_func(self, stage_ineq_func):
+        self.stage_ineq_func = stage_ineq_func
 
-    def set_state_ineq_jacobian(self, state_ineq_jacobian):
+    def set_stage_ineq_jacobian(self, stage_ineq_jacobian):
 
         # state inequalities are multiple functions for each time-step (for horizon length > 1),
         # so jacobian = [gradient1; gradient2; ...]
-        self.state_ineq_jacobian = state_ineq_jacobian
+        self.stage_ineq_jacobian = stage_ineq_jacobian
 
-    def state_ineq_constraint_jacobian(self, z):
+    def stage_ineq_constraint_jacobian(self, z_tau):
+        # given the current iteration of primal optvars: [u0, x1, u1 ... xN], this function returns the
+        # jacobian of the stage inequalities g wrt to the optvars
+        
+        optvar_jacobian = np.zeros((self.n_exp_ineq_constraints, self.n_optimization_vars))
+        
+        for k in range(self.n_horizon):
+            
+            xu_stage = np.hstack([self.x_stage(z_tau, k), self.u_stage(z_tau, k)])
+            
+            # indices in the horizon optimization variables z
+            optvar_idx = self.xustage_opt_indices[k]
+            fullvar_idx = self.xustage_full_indices[k]
 
-        # return np.vstack([con['jac'](z) for con in self.exp_ineq_constraints])
+            fullvar_jacobian = self.stage_ineq_jacobian(xu_stage)
+            
+            optvar_jacobian[:, optvar_idx] = optvar_jacobian[:, optvar_idx] + fullvar_jacobian[:, fullvar_idx]
 
-        jacobian = np.zeros((self.n_exp_ineq_constraints, self.n_total_vars))
-
-        # for k in range(self.n_horizon):
-
-        x_stages = [self.current_states(z, k) for k in range(self.n_horizon)] + self.next_states(z, -1)
-
-        # indices in the horizon optimization variables z
-        input_idx = self.state_ineq_input_indices
-
-        optvar_idx = self.state_ineq_optvar_indices
-
-        # this jacobian is a function of x_stages variables only
-        jac = self.state_ineq_jacobian(x_stages)
-
-        jacobian[:, input_idx] = jacobian[:, input_idx] + jac[:, optvar_idx]
-
-        return jacobian
+        return optvar_jacobian
 
     ####################################################################################################################
     # NEXT STATE EQUALITY CONSTRAINTS
@@ -362,26 +413,26 @@ class OCP:
     def disc_calculated_next_states(self, z, k):
         # discrete calculated next states
         return np.hstack([self.next_state_funcs[d](
-            np.concatenate([self.lagged_states(z, k), self.lagged_inputs(z, k),
-                            self.lagged_disturbances(z, k)])) for d in range(self.n_states)])
+            np.concatenate([self.x_lagged(z, k), self.u_lagged(z, k),
+                            self.w_lagged(k)])) for d in range(self.n_states)])
 
     def cont_calculated_state_changes(self, z, k):
         # continuous calculated next states
-        return np.hstack([self.t_step * self.next_state_funcs[d](
-            np.concatenate([self.lagged_states(z, k), self.lagged_inputs(z, k),
-                            self.lagged_disturbances(z, k)])) for d in range(self.n_states)])
+        return np.hstack([self.mpc_t_step * self.next_state_funcs[d](
+            np.concatenate([self.x_lagged(z, k), self.u_lagged(z, k),
+                            self.w_lagged(k)])) for d in range(self.n_states)])
 
-    def next_state_constraint_func(self, z):
+    def next_state_constraint_func(self, z_tau):
 
         dynamic_state_cons = []
         if self.model_type == 'continuous':
             for k in range(self.n_horizon):
-                dynamic_state_cons.append(z[self.next_state_indices[k]]
-                                          - (self.current_states(z, k) + self.cont_calculated_state_changes(z, k)))
+                dynamic_state_cons.append(z_tau[self.next_state_indices[k]]
+                                          - (self.x_stage(z, k) + self.cont_calculated_state_changes(z_tau, k)))
 
         elif self.model_type == 'discrete':
             for k in range(self.n_horizon):
-                dynamic_state_cons.append(z[self.next_state_indices[k]] - self.disc_calculated_next_states(z, k))
+                dynamic_state_cons.append(z_tau[self.next_state_indices[k]] - self.disc_calculated_next_states(z_tau, k))
 
         return np.concatenate(dynamic_state_cons)
 
@@ -392,7 +443,7 @@ class OCP:
         self.next_state_jacobians = next_state_jacobians
 
     # next_state_constraint_jac
-    def next_state_constraint_jacobian(self, z):
+    def next_state_constraint_jacobian(self, z_tau):
 
         """
         F = lambda z: np.vstack([z[self.next_state_indices[k]][np.newaxis, :].T - self.disc_calculated_next_states(z, k)
@@ -407,48 +458,42 @@ class OCP:
         # J_F = jacobian_func(F, z)
         """
 
-        # return np.vstack([con['jac'](z) for con in self.exp_eq_constraints])
-        # return np.vstack([self.next_state_jacobian(np.hstack([self.lagged_states(z, k),
-        #                 self.lagged_inputs(z, k),
-        #                 self.lagged_disturbances(z, k)])) for k in range(self.n_horizon)])
+        optvar_jacobian = np.zeros((self.n_horizon * self.n_states, self.n_optimization_vars))
 
-        jacobian = np.zeros((self.n_horizon * self.n_states, self.n_total_vars))
-
-        z_lagged = [np.hstack([self.lagged_states(z, k), self.lagged_inputs(z, k), self.lagged_disturbances(z, k)])
+        z_lagged = [np.hstack([self.x_lagged(z_tau, k), self.u_lagged(z_tau, k), self.w_lagged(k)])
                     for k in range(self.n_horizon)]
 
         # indices in the horizon optimization variables z
-        input_idx = self.next_state_eq_input_indices
-        optvar_idx = self.next_state_eq_optvar_indices
+        fullvar_idx = self.xustage_full_indices
+        optvar_idx = self.xustage_opt_indices
 
         # indices in z_stage
-
+        # for each next state equation x_k+1 = F(z_lagged)
         for k in range(self.n_horizon):
 
-            jac_x = np.zeros((self.n_states, self.n_total_vars))
+            # next_state_fullvar_jacobian = np.zeros((self.n_states, self.n_stage_vars + self.n_states))
             for i, d in enumerate(self.next_state_indices[k]):
-                jac_x[i, d] = 1
+                optvar_jacobian[i, d] = 1
 
+            next_state_function_fullvar_jacobian = \
+                np.hstack([np.vstack([self.next_state_jacobians[d](z_lagged[k]) for d in range(self.n_states)]),
+                          np.zeros((self.n_states, 1))])
+            
             stage_state_start_idx = k * self.n_states
             stage_state_end_idx = (k + 1) * self.n_states
 
-            jacobian[stage_state_start_idx:stage_state_end_idx] = \
-                jacobian[stage_state_start_idx:stage_state_end_idx] + jac_x
+            optvar_jacobian[stage_state_start_idx:stage_state_end_idx, optvar_idx[k]] = \
+                optvar_jacobian[stage_state_start_idx:stage_state_end_idx, optvar_idx[k]] \
+                 - next_state_function_fullvar_jacobian[:, fullvar_idx[k]]
 
-            # jacobian_func(self.next_state_func, z_lagged[k])
-            jac_f = np.vstack([self.next_state_jacobians[d](z_lagged[k]) for d in range(self.n_states)])
-
-            jacobian[stage_state_start_idx:stage_state_end_idx, input_idx[k]] = \
-                jacobian[stage_state_start_idx:stage_state_end_idx, input_idx[k]] - jac_f[:, optvar_idx[k]]
-
-        return jacobian
+        return optvar_jacobian
 
     ####################################################################################################################
     # IMPLICIT CONSTRAINTS
 
     def set_imp_bounds(self, stage_bounds, term_bounds):
-        self.stage_bounds = np.array(list((stage_bounds.values())))
-        self.term_bounds = np.array(list(term_bounds.values()))
+        self.stage_bounds = stage_bounds  # np.array(list((stage_bounds.values())))
+        self.term_bounds = term_bounds  # np.array(list(term_bounds.values()))
 
     def set_imp_constraints(self, stage_constraint_func, term_constraint_func):
         # take in a single constraint function, which given an array of stage variables will output the value of g(z),
@@ -457,9 +502,8 @@ class OCP:
         self.term_constraint_func = term_constraint_func
 
     def implicit_constraint_func(self, z):
-
         imp_stage_cons = np.concatenate([self.stage_constraint_func(np.concatenate(
-            [self.current_states(z, k), self.current_inputs(z, k), self.current_disturbances(z, k)]))
+            [self.x_stage(z, k), self.u_stage(z, k)]))
             for k in range(self.n_horizon)])
 
         imp_term_cons = self.term_constraint_func(self.next_states(z, -1))
@@ -479,8 +523,8 @@ class OCP:
 
         # define g_1, g_2 ... g_N
 
-        self.exp_ineq_constraints.append({'type': 'ineq', 'fun': self.state_ineq_func})
-        self.n_exp_ineq_constraints += self.state_ineq_func(np.zeros(self.n_total_vars)).shape[0]
+        self.exp_ineq_constraints.append({'type': 'ineq', 'fun': self.stage_ineq_func})
+        self.n_exp_ineq_constraints += self.stage_ineq_func(np.zeros(self.n_stage_vars)).shape[0]
 
         self.exp_eq_constraints.append({'type': 'eq', 'fun': self.next_state_constraint_func})
         self.n_exp_eq_constraints += self.n_horizon * self.n_states
@@ -490,4 +534,3 @@ class OCP:
         self.constraints = self.exp_ineq_constraints + self.exp_eq_constraints + self.imp_ineq_constraints
 
         return
-

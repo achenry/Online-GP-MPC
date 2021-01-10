@@ -5,22 +5,22 @@ import pandas as pd
 
 
 class Simulator:
-    def __init__(self, training_data_reader, ocp, mpc, actual_next_state_func, actual_stage_cost_func,
-                 actual_terminal_cost_func, n_simulation_steps, state_meas_noises, numerical_bounds):
+    def __init__(self, ocp, mpc, model, n_simulation_steps):
 
-        self.training_data_reader = training_data_reader
         self.ocp = ocp
         self.mpc = mpc
+        self.model = model
         self.n_simulation_steps = n_simulation_steps
 
-        self.actual_next_state_func = actual_next_state_func
-        self.actual_stage_cost_func = actual_stage_cost_func
-        self.actual_terminal_cost_func = actual_terminal_cost_func
+        self.true_next_state_func = model.true_next_state_func
+        self.true_stage_cost_func = model.true_stage_cost_func
+        self.true_terminal_cost_func = model.terminal_cost_func
 
         self.state_trajectory = None
         self.output_trajectory = None
         self.input_trajectory = None
         self.disturbance_trajectory = None
+        self.output_trajectory = None
         self.cost_trajectory = None
         self.ineq_constraint_trajectory = None
         self.eq_constraint_trajectory = None
@@ -28,24 +28,26 @@ class Simulator:
         self.ave_regret_trajectory = None
         self.reset_trajectories()
 
-        self.state_meas_noises = state_meas_noises
-        self.numerical_bounds = numerical_bounds
+        self.numerical_bounds = model.numerical_bounds
 
     def reset_trajectories(self):
         self.state_trajectory = np.zeros((0, self.ocp.n_states))
         self.output_trajectory = np.zeros((0, self.ocp.n_states))
         self.input_trajectory = np.zeros((0, self.ocp.n_inputs))
         self.disturbance_trajectory = np.zeros((0, self.ocp.n_disturbances))
+        self.output_trajectory = np.zeros((0, self.ocp.n_outputs))
         self.cost_trajectory = np.zeros((0, 1))
         self.ineq_constraint_trajectory = np.zeros((0, int(self.ocp.n_exp_ineq_constraints / self.ocp.n_horizon)))
         self.eq_constraint_trajectory = np.zeros((0, int(self.ocp.n_exp_eq_constraints / self.ocp.n_horizon)))
         self.regret_trajectory = np.zeros((0, 1))
+        self.ave_regret_trajectory = np.zeros((0, 1))
 
     def set_trajectories(self, traj_df):
         self.state_trajectory = traj_df.x0
         #self.output_trajectory = np.zeros((0, self.ocp.n_states))
         self.input_trajectory = traj_df.u0
         self.disturbance_trajectory = traj_df.w0
+        self.output_trajectory = traj_df.y0
         self.cost_trajectory = traj_df.cost
         self.ineq_constraint_trajectory = traj_df.ineq_constraints
         self.eq_constraint_trajectory = traj_df.eq_contraints
@@ -59,50 +61,48 @@ class Simulator:
 
         return next_state
 
-    def actual_cost_func(self, z):
+    def true_cost_func(self, z):
 
-        stage_cost = np.sum([self.actual_stage_cost_func(np.hstack(
-            [self.ocp.current_states(z, k), self.ocp.current_inputs(z, k)])) for k in range(self.ocp.n_horizon)])
+        stage_cost = np.sum([self.true_stage_cost_func(np.hstack(
+            [self.ocp.x_stage(z, k), self.ocp.u_stage(z, k), self.ocp.w_stage(k)])) for k in range(self.ocp.n_horizon)])
 
-        term_cost = self.actual_terminal_cost_func(z[self.ocp.next_state_indices[-1]])
+        term_cost = self.true_terminal_cost_func(z[self.ocp.next_state_indices[-1]])
 
         cost = float(stage_cost + term_cost)
 
         return cost
 
-    # def actual_equality_constraint_func(self, z):
-    #     actual_next_states = self.actual_next_state_func(z)
+    # def true_equality_constraint_func(self, z):
+    #     true_next_states = self.true_next_state_func(z)
     #     calculated_next_states = z[self.ocp.next_state_indices]
-    #     return calculated_next_states - actual_next_states
+    #     return calculated_next_states - true_next_states
 
-    def simulate_thread_func(self, x0, disturbances, is_simulation_running):
-        self.simulate(x0, disturbances)
-        is_simulation_running.set()
+    def simulate_thread_func(self, init_state, true_state, true_disturbances, synthetic_data=False):
+        self.simulate(init_state, true_state, true_disturbances, synthetic_data)
 
-    def simulate(self, x0, disturbances):
+    def simulate(self, init_state, true_state, true_disturbances, synthetic_data=False):
 
-        x0 = np.array(x0, dtype='float')
+        x0 = init_state
+
         # initialise the lagged states vector with the initial state
-        init_state = x0
-        self.ocp.init_state = init_state
         lagged_states = np.concatenate([init_state for k in range(self.ocp.state_lag + 1)])
 
         # initialise the lagged inputs vector with the initial input
-        init_input = np.zeros(self.ocp.n_inputs)
-        self.ocp.init_input = init_input
+        init_input = np.zeros(self.model.n_inputs)
         lagged_inputs = np.tile(init_input, self.ocp.input_lag + 1)
 
         # initialise the lagged disturbance vector with the initial disturbance
-        init_disturbance = disturbances[0] if len(disturbances) else None
-        self.ocp.init_disturbance = init_disturbance
-        self.ocp.disturbances = disturbances.flatten()
+        init_disturbance = true_disturbances[0] if len(true_disturbances) else None
         lagged_disturbances = np.tile(init_disturbance, self.ocp.disturbance_lag + 1)
 
-        self.mpc.z_init = np.zeros(self.ocp.n_total_vars
+        self.mpc.z_init = np.zeros(self.ocp.n_optimization_vars
                                    + self.ocp.n_exp_ineq_constraints
                                    + self.ocp.n_exp_eq_constraints)
 
         for k0 in range(self.n_simulation_steps):
+
+            self.model.set_simulation_step(k0)
+            self.ocp.true_disturbances = true_disturbances[k0:k0 + self.ocp.n_horizon].flatten()
 
             # get lagged states and add on most recent state
             lagged_states = np.concatenate([lagged_states[self.ocp.n_states:], x0])
@@ -110,15 +110,9 @@ class Simulator:
             # add current state to trajectory
             self.state_trajectory = np.vstack([self.state_trajectory, x0])
 
-            # get measured state
-            # y_0 = x0 + np.array([np.random.normal([0], self.state_meas_noises, 1) for d in range(self.ocp.n_states)])
-
-            # add new measured state to trajectory
-            # self.output_trajectory = np.vstack([self.state_trajectory, y0])
-
             if self.ocp.n_disturbances:
                 # fetch current disturbances from known exogeneous disturbances
-                w0 = disturbances[k0]
+                w0 = true_disturbances[k0]
                 # add current disturbances to lagged disturbances
                 lagged_disturbances = np.concatenate([lagged_disturbances[self.ocp.n_disturbances:], w0])
             else:
@@ -127,16 +121,17 @@ class Simulator:
 
             # run mpc optimize
             self.ocp.set_lagged_vars(lagged_states, lagged_inputs, lagged_disturbances)
-            res_opt = self.mpc.optimize_horizon()
-            self.mpc.z_init = np.array(res_opt.x, dtype='float64')
-            # self.ocp.update_vars(res_opt.x)
+            res_opt = self.mpc.optimize_horizon(k0=k0)
+            z_opt = np.array(res_opt.x, dtype='float64')
+            self.mpc.z_init = z_opt
 
             # get optimal primal variables
             z = res_opt.x[:self.ocp.n_total_vars]
 
-            ineq_constraint = [con['fun'](z)[:int(self.ocp.n_exp_ineq_constraints / self.ocp.n_horizon)] for con in self.ocp.exp_ineq_constraints]
-            eq_constraint = [con['fun'](z)[:int(self.ocp.n_exp_eq_constraints / self.ocp.n_horizon)] for con in self.ocp.exp_eq_constraints]
-                #self.actual_equality_constraint_func(z)
+            ineq_constraint = [con['fun'](z)[:int(self.ocp.n_exp_ineq_constraints / self.ocp.n_horizon)]
+                               for con in self.ocp.exp_ineq_constraints]
+            eq_constraint = [con['fun'](z)[:int(self.ocp.n_exp_eq_constraints / self.ocp.n_horizon)]
+                             for con in self.ocp.exp_eq_constraints]
 
             self.ineq_constraint_trajectory = np.vstack([self.ineq_constraint_trajectory, ineq_constraint])
             self.eq_constraint_trajectory = np.vstack([self.eq_constraint_trajectory, eq_constraint])
@@ -147,7 +142,7 @@ class Simulator:
             z0 = z[:self.ocp.n_stage_vars]
 
             # get optimal cost and add to cost trajectory
-            cost = np.array([res_opt.fun])
+            modelled_cost = np.array([res_opt.fun])[0]
 
             # if should_cost != cost[0]:
             #     calc_cost = self.ocp.cost_func(res_opt.x[:self.ocp.n_total_vars])
@@ -159,48 +154,51 @@ class Simulator:
             # add current input to lagged inputs
             lagged_inputs = np.concatenate([lagged_inputs[self.ocp.n_inputs:], u0])
 
-            # plug current state and optimized control input into system and fetch actual next state
+            # plug current state and optimized control input into system and fetch true next state
             # if the output of the dynamic state function is the rate of change, assume continuous rate of change
             # over our time step to find next state
 
             z_lagged = np.hstack([lagged_states, lagged_inputs, lagged_disturbances])
-            # z_current = np.hstack([x0, u0])
 
-            if self.ocp.model_type == 'continuous':
-                x0 = x0 + (self.actual_next_state_func(z=z_lagged) * self.ocp.t_step)
-            elif self.ocp.model_type == 'discrete':
-                x0 = self.actual_next_state_func(z=z_lagged)
+            true_cost = self.true_cost_func(z)
+            self.cost_trajectory = np.vstack([self.cost_trajectory, true_cost])
 
-                # np.sum(list([x0[0] ** 2]) + list(res_opt.x[[x[0] for x in self.ocp.next_state_indices]] ** 2))
-            # print(should_cost, cost[0])
+            # np.sum(list([x0[0] ** 2]) + list(res_opt.x[[x[0] for x in self.ocp.next_state_indices]] ** 2))
+            # print(true_cost, modelled_cost)
             # print(x0[0], res_opt.x[[x[0] for x in self.ocp.next_state_indices]])
 
-            actual_cost = self.actual_cost_func(z)
-            self.cost_trajectory = np.vstack([self.cost_trajectory, actual_cost])
+            modelled_next_state = self.modelled_next_state_func(z)
+            if synthetic_data:
+                if self.ocp.model_type == 'continuous':
+                    x0 = x0 + (self.true_next_state_func(z=z_lagged) * self.ocp.mpc_t_step)
+                elif self.ocp.model_type == 'discrete':
+                    x0 = self.true_next_state_func(z_lagged=z_lagged)
+            else:
+                # TODO
+                # x0 = true_state[k0 + 1]
+                x0 = modelled_next_state #z0[self.ocp.n_inputs:self.ocp.n_inputs + self.ocp.n_states]
 
             self.regret_trajectory = np.vstack([self.regret_trajectory, self.mpc.opt_object.regret])
             self.ave_regret_trajectory = np.vstack([self.ave_regret_trajectory, self.mpc.opt_object.ave_regret])
 
-            modelled_next_state = self.modelled_next_state_func(z)
-
             print(f'\nTime-Step == {k0}\n'
-                  f'primal variables == {res_opt.x[:self.ocp.n_total_vars]}\n'
+                  f'primal variables == {z}\n'
                   f'dual variables == {res_opt.x[self.ocp.n_total_vars:]}\n'
-                  f'modelled cost == {cost[0]}\n'
-                  f'actual cost == {actual_cost}\n'
+                  f'modelled cost == {modelled_cost}\n'
+                  f'true cost == {true_cost}\n'
                   f'modelled next state == {modelled_next_state}\n'
-                  f'actual next state == {x0}\n')
+                  f'true next state == {x0}\n')
 
             # TODO add state estimator?
 
         return self.state_trajectory, self.output_trajectory, self.input_trajectory, self.disturbance_trajectory, \
                self.cost_trajectory,  self.regret_trajectory, self.ave_regret_trajectory, \
-               yself.ineq_constraint_trajectory, self.eq_constraint_trajectory
+               self.ineq_constraint_trajectory, self.eq_constraint_trajectory
 
     def plot_trajectory(self, comp_sim_df=None):
 
         # plot for states, inputs, cost, regret ineq constraint violation, eq constraint violation
-        n_plots = 6
+        n_plots = 7
         self.traj_fig, self.traj_ax = plt.subplots(n_plots, sharex=True, frameon=False)
         self.traj_fig.align_ylabels()
         self.traj_ax[-1].set_xlabel('time-step')
@@ -210,9 +208,10 @@ class Simulator:
 
         self.traj_ax[2].set_ylabel('cost', rotation=0)
         self.traj_ax[3].set_ylabel('regret', rotation=0)
+        self.traj_ax[4].set_ylabel('average regret', rotation=0)
 
-        self.traj_ax[4].set_ylabel('ineq constraint', rotation=0)
-        self.traj_ax[5].set_ylabel('eq constraint', rotation=0)
+        self.traj_ax[5].set_ylabel('ineq constraint', rotation=0)
+        self.traj_ax[6].set_ylabel('eq constraint', rotation=0)
 
         xticks = np.linspace(0, self.n_simulation_steps, 11) if self.n_simulation_steps >= 20 \
             else np.arange(self.n_simulation_steps)
@@ -243,17 +242,22 @@ class Simulator:
             self.traj_ax[3].plot(time_series, np.vstack(comp_sim_df.regret.values)[:, 0],
                                  linestyle='dashed', color=self.traj_ax[3].get_lines()[-1].get_color())
 
+        self.traj_ax[4].plot(time_series, self.ave_regret_trajectory)
+        if comp_sim_df is not None:
+            self.traj_ax[4].plot(time_series, np.vstack(comp_sim_df.average_regret.values)[:, 0],
+                                 linestyle='dashed', color=self.traj_ax[4].get_lines()[-1].get_color())
+
         for c in range(int(self.ocp.n_exp_ineq_constraints / self.ocp.n_horizon)):
-            self.traj_ax[4].plot(time_series, self.ineq_constraint_trajectory[:, c], label=f"$g_{{{c}}}$",)
+            self.traj_ax[5].plot(time_series, self.ineq_constraint_trajectory[:, c], label=f"$g_{{{c}}}$",)
             if comp_sim_df is not None:
-                self.traj_ax[4].plot(time_series, np.vstack(comp_sim_df.ineq_constraints.values)[:, c],
-                                     linestyle='dashed', color=self.traj_ax[4].get_lines()[-1].get_color())
+                self.traj_ax[5].plot(time_series, np.vstack(comp_sim_df.ineq_constraints.values)[:, c],
+                                     linestyle='dashed', color=self.traj_ax[5].get_lines()[-1].get_color())
 
         for c in range(int(self.ocp.n_exp_eq_constraints / self.ocp.n_horizon)):
-            self.traj_ax[5].plot(time_series, self.eq_constraint_trajectory[:, c], label=f"$F_{{{c}}}$")
+            self.traj_ax[6].plot(time_series, self.eq_constraint_trajectory[:, c], label=f"$F_{{{c}}}$")
             if comp_sim_df is not None:
-                self.traj_ax[5].plot(time_series, np.vstack(comp_sim_df.eq_constraints.values)[:, c],
-                                     linestyle='dashed', color=self.traj_ax[5].get_lines()[-1].get_color())
+                self.traj_ax[6].plot(time_series, np.vstack(comp_sim_df.eq_constraints.values)[:, c],
+                                     linestyle='dashed', color=self.traj_ax[6].get_lines()[-1].get_color())
 
         for traj_ax in self.traj_ax:
             traj_ax.set_xticks(xticks)
@@ -298,11 +302,11 @@ class Simulator:
             y = [0, np.sin((np.pi / 2) - self.state_trajectory[i, 0])]
 
             line.set_data(x, y)
-            time_text.set_text(time_template % (i * self.ocp.t_step))
+            time_text.set_text(time_template % (i * self.ocp.mpc_t_step))
             return line, time_text
 
         anim = animation.FuncAnimation(anim_fig, animate, np.arange(1, self.n_simulation_steps),
-                                       interval=1000 * self.ocp.t_step, blit=True, init_func=init)
+                                       interval=1000 * self.ocp.mpc_t_step, blit=True, init_func=init)
 
         return anim_fig, anim_ax, anim
 
