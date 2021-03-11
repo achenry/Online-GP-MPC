@@ -1,12 +1,10 @@
-./results/Compared Simulations ./results/GP Ntr=10 ./results/GP Ntr=100 ./results/GP Ntr=1000 ./results/GP Ntr=2000 ./results/GP Ntr=25 ./results/GP Ntr=250 ./results/GP Ntr=5 ./results/GP Ntr=50 ./results/GP Ntr=500 ./results/GP Offline N=3 ./results/GP Offline N=5 ./results/GP Online N=5 maxiter=1 ./results/GP Online N=5 maxiter=10 ./results/GP Online N=5 maxiter=5 ./results/Known Models Offline N=3 ./results/Known Models Offline N=5 ./results/Known Models Online N=3 maxiter=1 ./results/Known Models Online N=5 maxiter=1 ./results/Known Models Online N=5 maxiter=10 ./results/Known Models Online N=5 maxiter=5 ./results/exports ./results/gp_results.csv ./results/simulation_parameters.csv
-./venv/
-./venv/bin ./venv/include ./venv/lib ./venv/pyvenv.cfg ./venv/src
-./results/
-samples.json
+./venv/*
+./results/*
+./network/*
+./device_deta/*
 archive.py
 scratch.py
 Plotter.py
-simulation_parameters.csv
-venv/bin venv/include venv/lib venv/pyvenv.cfg venv/src
-venv/
-results/Compared Simulations results/GP Ntr=10 results/GP Ntr=100 results/GP Ntr=1000 results/GP Ntr=2000 results/GP Ntr=25 results/GP Ntr=250 results/GP Ntr=5 results/GP Ntr=50 results/GP Ntr=500 results/GP Offline N=3 results/GP Offline N=5 results/GP Offline N=8 results/GP Online N=3 maxiter=50 results/Known Models Offline N=3 results/Known Models Offline N=5 results/Known Models Offline N=8 results/Known Models Online N=3 maxiter=50 results/exports results/mpc_results.csv
+*.csv
+*.png
+./gd_plots/*
