@@ -1,10 +1,8 @@
 import numpy as np
-from helper_functions import gradient_func, jacobian_func
-
 
 class OCP:
 
-    def __init__(self, n_horizon, state_lag, input_lag, disturbance_lag, output_lag, mpc_t_step, model,
+    def __init__(self, n_horizon, state_lag, input_lag, disturbance_lag, output_lag, mpc_t_step,
                  imp_bounds_only=True, model_type='discrete'):
 
         # horizon length
@@ -14,13 +12,13 @@ class OCP:
         # stage cost, terminal cost and dynamic state functions
         self.stage_cost_func = None
         self.terminal_cost_func = None
-        self.next_state_funcs = None
-        self.stage_ineq_func = None
+        self.next_state_func = None
+        self.stage_ineq_constraint_f = None
 
         self.stage_cost_jacobian = None
         self.terminal_cost_jacobian = None
-        self.next_state_jacobians = None
-        self.stage_ineq_jacobian = None
+        self.next_state_jacobian = None
+        self.stage_ineq_constraint_jac = None
 
         # all constraints
         self.constraints = []
@@ -85,9 +83,6 @@ class OCP:
         self.disturbance_lag = disturbance_lag
         self.output_lag = output_lag
 
-        # self.x_stage = None
-        # self.u_stage = None
-
         self.previous_x_lagged = None
         self.previous_u_lagged = None
         self.previous_w_lagged = None
@@ -109,11 +104,6 @@ class OCP:
 
         self.model_type = model_type
         self.mpc_t_step = mpc_t_step
-
-        self.set_opt_vars(model.n_states, model.n_inputs, model.n_disturbances, model.n_outputs)
-        self.set_params(model.parameters)
-        self.set_stage_ineq_func(model.stage_ineq_constraint_func)
-        self.set_imp_bounds(model.stage_bounds, model.term_bounds)
 
     ####################################################################################################################
     # VARIABLES & PARAMETERS
@@ -194,38 +184,6 @@ class OCP:
         self.xustage_full_indices = [np.arange(self.n_inputs) + n_lagged_states] + \
             [np.hstack([np.arange(self.n_states), np.arange(self.n_inputs) + n_lagged_states])
              for k in range(self.n_horizon - 1)]
-        
-        
-        # self.stage_cost_fullvar_indices = np.hstack([self.x_stage_indices, self.u_stage_indices, self.w_stage_indices])
-        # self.stage_cost_optvar_indices = [np.where(self.stage_cost_fullvar_indices[k] >= 0)[0] for k in
-        #                                    range(self.n_horizon)]
-        #
-        # # remove all variables from before this horizon
-        # self.stage_cost_fullvar_indices = [self.stage_cost_fullvar_indices[k][self.stage_cost_fullvar_indices[k] >= 0]
-        #                                  for k in range(self.n_horizon)]
-        #
-        # self.stage_ineq_fullvar_indices = np.vstack([np.hstack([self.x_stage_indices, self.u_stage_indices])])
-        # self.stage_ineq_optvar_indices = np.where(self.stage_ineq_fullvar_indices.flatten() >= 0)[0]
-        #
-        # # remove all variables from before this horizon
-        # self.stage_ineq_fullvar_indices = self.stage_ineq_fullvar_indices[self.stage_ineq_fullvar_indices >= 0]
-        #
-        # self.next_state_eq_fullvar_indices = np.vstack([
-        #     np.hstack([self.x_lagged_indices[k], self.u_lagged_indices[k]]) for k in range(self.n_horizon)])
-        #
-        # self.next_state_eq_optvar_indices = [np.where(self.next_state_eq_fullvar_indices[k] >= 0)[0]
-        #                                      for k in range(self.n_horizon)]
-        #
-        # # remove all variables from before this horizon
-        # self.next_state_eq_fullvar_indices = [self.next_state_eq_fullvar_indices[k][
-        #                                         self.next_state_eq_fullvar_indices[k] >= 0]
-        #                                     for k in range(self.n_horizon)]
-        #
-        # # remove disturbance indices from input indices
-        # for k in range(self.n_horizon):
-        #     for idx, i in enumerate(self.next_state_eq_fullvar_indices[k]):
-        #         if i in self.w_stage_indices or i < 0:
-        #             self.next_state_eq_fullvar_indices[k] = np.delete(self.next_state_eq_fullvar_indices[k], idx)
 
     def set_params(self, parameters):
         self.parameters = parameters
@@ -323,10 +281,11 @@ class OCP:
     ####################################################################################################################
     # COST FUNCTION
 
-    def set_cost_funcs(self, stage_cost_func, terminal_cost_func):
+    def set_cost_funcs(self, stage_cost_func, terminal_cost_func, device_stage_cost_func):
         # single stage
         self.stage_cost_func = stage_cost_func
         self.terminal_cost_func = terminal_cost_func
+        self.device_stage_cost_func = device_stage_cost_func
 
     def set_cost_jacobians(self, stage_cost_jacobian, terminal_cost_jacobian):
         # single function, so jacobian = [gradient]
@@ -338,12 +297,12 @@ class OCP:
         stage_cost = 0
         for k in range(self.n_horizon):
             z_stage = np.hstack([self.x_stage(z_tau, k), self.u_stage(z_tau, k), self.w_stage(k)])
-            stage_cost += self.stage_cost_func(z_stage, k0 + k)
+            stage_cost = stage_cost + self.stage_cost_func(z_stage, k0 + k)
 
         x_term = self.next_states(z_tau, -1)
-        term_cost = self.terminal_cost_func(x_term, k0 + k)
+        term_cost = self.terminal_cost_func(x_term, k0 + self.n_horizon)
 
-        return float(stage_cost + term_cost)
+        return np.array(float(stage_cost + term_cost))
 
     def horizon_cost_jacobian(self, z_tau, k0=0):
         # given the current iteration of primal optvars: [u0, x1, u1 ... xN], this function returns the
@@ -374,22 +333,34 @@ class OCP:
     ####################################################################################################################
     # STATE INEQUALITY CONSTRAINTS
 
-    def set_stage_ineq_func(self, stage_ineq_func):
-        self.stage_ineq_func = stage_ineq_func
+    def set_stage_ineq_constraint_func(self, stage_ineq_constraint_func):
 
-    def set_stage_ineq_jacobian(self, stage_ineq_jacobian):
+        self.stage_ineq_constraint_f = stage_ineq_constraint_func
+
+    def set_stage_ineq_constraint_jacobian(self, stage_ineq_constraint_jacobian):
 
         # state inequalities are multiple functions for each time-step (for horizon length > 1),
         # so jacobian = [gradient1; gradient2; ...]
-        self.stage_ineq_jacobian = stage_ineq_jacobian
+        self.stage_ineq_constraint_jac = stage_ineq_constraint_jacobian
 
-    def stage_ineq_constraint_jacobian(self, z_tau):
+    def stage_ineq_constraint_func(self, z_tau, k0=0):
+        cons = []
+        for k in range(1, self.n_horizon):
+            xu_stage = np.hstack([self.x_stage(z_tau, k), self.u_stage(z_tau, k)])
+            cons = np.append(cons, self.stage_ineq_constraint_f(xu_stage, k0 + k, True))
+
+        x_term = self.next_states(z_tau, -1)
+        cons = np.append(cons, self.stage_ineq_constraint_f(x_term, k0 + self.n_horizon, False))
+
+        return np.array(cons)
+
+    def stage_ineq_constraint_jacobian(self, z_tau, k0):
         # given the current iteration of primal optvars: [u0, x1, u1 ... xN], this function returns the
         # jacobian of the stage inequalities g wrt to the optvars
         
         optvar_jacobian = np.zeros((self.n_exp_ineq_constraints, self.n_optimization_vars))
-        
-        for k in range(self.n_horizon):
+        con_start_idx = 0
+        for k in range(1, self.n_horizon):
             
             xu_stage = np.hstack([self.x_stage(z_tau, k), self.u_stage(z_tau, k)])
             
@@ -397,53 +368,61 @@ class OCP:
             optvar_idx = self.xustage_opt_indices[k]
             fullvar_idx = self.xustage_full_indices[k]
 
-            fullvar_jacobian = self.stage_ineq_jacobian(xu_stage)
-            
-            optvar_jacobian[:, optvar_idx] = optvar_jacobian[:, optvar_idx] + fullvar_jacobian[:, fullvar_idx]
+            fullvar_jacobian = self.stage_ineq_constraint_jac(xu_stage, k0 + k, True)
+
+            con_end_idx = con_start_idx + fullvar_jacobian.shape[0]
+            optvar_jacobian[con_start_idx:con_end_idx, optvar_idx] = \
+                optvar_jacobian[con_start_idx:con_end_idx, optvar_idx] + fullvar_jacobian[:, fullvar_idx]
+            con_start_idx = con_end_idx
+
+        x_term = self.next_states(z_tau, -1)
+        fullvar_jacobian = self.stage_ineq_constraint_jac(x_term, k0 + self.n_horizon, False)
+        optvar_idx = self.xterm_opt_indices
+        optvar_jacobian[con_start_idx:, optvar_idx] = optvar_jacobian[con_start_idx:, optvar_idx] + fullvar_jacobian
 
         return optvar_jacobian
 
     ####################################################################################################################
     # NEXT STATE EQUALITY CONSTRAINTS
 
-    def set_next_state_funcs(self, next_state_funcs):
+    def set_next_state_func(self, next_state_func):
         # single-stage
-        self.next_state_funcs = next_state_funcs
+        self.next_state_func = next_state_func
 
-    def disc_calculated_next_states(self, z, k):
+    def disc_calculated_next_states(self, z_tau, k, k0, return_std=False):
         # discrete calculated next states
-        return np.hstack([self.next_state_funcs[d](
-            np.concatenate([self.x_lagged(z, k), self.u_lagged(z, k),
-                            self.w_lagged(k)])) for d in range(self.n_states)])
+        z_lagged = np.concatenate([self.x_lagged(z_tau, k), self.u_lagged(z_tau, k), self.w_lagged(k)])
+        return self.next_state_func(z_lagged, k0 + k, return_std=return_std)
 
-    def cont_calculated_state_changes(self, z, k):
+    def cont_calculated_state_changes(self, z_tau, k, k0):
         # continuous calculated next states
-        return np.hstack([self.mpc_t_step * self.next_state_funcs[d](
-            np.concatenate([self.x_lagged(z, k), self.u_lagged(z, k),
-                            self.w_lagged(k)])) for d in range(self.n_states)])
+        z_lagged = np.concatenate([self.x_lagged(z_tau, k), self.u_lagged(z_tau, k), self.w_lagged(k)])
+        return self.mpc_t_step * self.next_state_func(z_lagged, k0 + k)
 
-    def next_state_constraint_func(self, z_tau):
+    def next_state_constraint_func(self, z_tau, k0=0):
 
         dynamic_state_cons = []
         if self.model_type == 'continuous':
             for k in range(self.n_horizon):
                 dynamic_state_cons.append(z_tau[self.next_state_indices[k]]
-                                          - (self.x_stage(z, k) + self.cont_calculated_state_changes(z_tau, k)))
+                                          - (self.x_stage(z_tau, k) + self.cont_calculated_state_changes(z_tau, k, k0)))
 
         elif self.model_type == 'discrete':
             for k in range(self.n_horizon):
-                dynamic_state_cons.append(z_tau[self.next_state_indices[k]] - self.disc_calculated_next_states(z_tau, k))
+                dynamic_state_cons.append(z_tau[self.next_state_indices[k]] -
+                                          self.disc_calculated_next_states(z_tau, k, k0))
+                # TODO replace z_tau with equiv ellipsoid w zero radius for point
 
         return np.concatenate(dynamic_state_cons)
 
-    def set_next_state_jacobians(self, next_state_jacobians):
+    def set_next_state_jacobian(self, next_state_jacobian):
 
         # next states are multiple functions for each time step (for horizon length > 1),
         # so jacobian = [gradient1; gradient2; ...]
-        self.next_state_jacobians = next_state_jacobians
+        self.next_state_jacobian = next_state_jacobian
 
     # next_state_constraint_jac
-    def next_state_constraint_jacobian(self, z_tau):
+    def next_state_constraint_jacobian(self, z_tau, k0):
 
         """
         F = lambda z: np.vstack([z[self.next_state_indices[k]][np.newaxis, :].T - self.disc_calculated_next_states(z, k)
@@ -471,13 +450,12 @@ class OCP:
         # for each next state equation x_k+1 = F(z_lagged)
         for k in range(self.n_horizon):
 
-            # next_state_fullvar_jacobian = np.zeros((self.n_states, self.n_stage_vars + self.n_states))
             for i, d in enumerate(self.next_state_indices[k]):
-                optvar_jacobian[i, d] = 1
+                optvar_jacobian[k * self.n_states + i, d] = 1
 
-            next_state_function_fullvar_jacobian = \
-                np.hstack([np.vstack([self.next_state_jacobians[d](z_lagged[k]) for d in range(self.n_states)]),
-                          np.zeros((self.n_states, 1))])
+            # df/dxlagged, df/dulagged, df/dwlagged
+
+            next_state_function_fullvar_jacobian = self.next_state_jacobian(z_lagged[k], k=k0 + k)
             
             stage_state_start_idx = k * self.n_states
             stage_state_end_idx = (k + 1) * self.n_states
@@ -501,12 +479,13 @@ class OCP:
         self.stage_constraint_func = stage_constraint_func
         self.term_constraint_func = term_constraint_func
 
-    def implicit_constraint_func(self, z):
+    def implicit_constraint_func(self, z_tau, k0=0):
+
         imp_stage_cons = np.concatenate([self.stage_constraint_func(np.concatenate(
-            [self.x_stage(z, k), self.u_stage(z, k)]))
+            [self.x_stage(z_tau, k), self.u_stage(z_tau, k), self.w_stage(k)]), k0 + k)
             for k in range(self.n_horizon)])
 
-        imp_term_cons = self.term_constraint_func(self.next_states(z, -1))
+        imp_term_cons = self.term_constraint_func(self.next_states(z_tau, -1), k0 + self.n_horizon)
 
         return np.concatenate([imp_stage_cons, imp_term_cons])
 
@@ -515,16 +494,8 @@ class OCP:
 
     def set_constraints(self):
 
-        # define x0
-        # self.init_state = init_state
-
-        # define w_0, w_1 ... w_N-1
-        # self.disturbances = disturbances
-
-        # define g_1, g_2 ... g_N
-
-        self.exp_ineq_constraints.append({'type': 'ineq', 'fun': self.stage_ineq_func})
-        self.n_exp_ineq_constraints += self.stage_ineq_func(np.zeros(self.n_stage_vars)).shape[0]
+        self.exp_ineq_constraints.append({'type': 'ineq', 'fun': self.stage_ineq_constraint_func})
+        self.n_exp_ineq_constraints += self.stage_ineq_constraint_func(np.zeros(self.n_optimization_vars), 0).shape[0]
 
         self.exp_eq_constraints.append({'type': 'eq', 'fun': self.next_state_constraint_func})
         self.n_exp_eq_constraints += self.n_horizon * self.n_states
