@@ -1,10 +1,11 @@
-./venv/*
-./results/*
-./network/*
-./device_deta/*
+./venv/
+./results/
+./network/
+./gd_plots/
+./device_data/
+./__pycache__/
 archive.py
 scratch.py
 Plotter.py
 *.csv
 *.png
-./gd_plots/*
