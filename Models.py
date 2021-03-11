@@ -247,16 +247,16 @@ class TCLModel(Model):
 
     def stage_bounds(self, z_stage):
 
-        stage_bounds = {f'T_zone_{self.idx}': [self.parameters['T_zone_min'][self.simulation_step],
-                                               self.parameters['T_zone_max'][self.simulation_step]],
+        stage_bounds = {f'T_zone_{self.idx}': [-np.inf, np.inf],#[self.parameters['T_zone_min'][self.simulation_step],
+                                               #self.parameters['T_zone_max'][self.simulation_step]],
                         f'P_zone_{self.idx}': [self.parameters['P_zone_min'][self.simulation_step],
                                                self.parameters['P_zone_max'][self.simulation_step]]}
         return np.vstack(list(stage_bounds.values()))
 
     def term_bounds(self, x_term):
-        term_bounds = {f'T_zone_{self.idx}':
-                           [self.parameters['T_zone_min'][self.simulation_step],
-                            self.parameters['T_zone_max'][self.simulation_step]]}
+        term_bounds = {f'T_zone_{self.idx}':[-np.inf, np.inf]}
+                          # [self.parameters['T_zone_min'][self.simulation_step],
+                           # self.parameters['T_zone_max'][self.simulation_step]]}
         return np.vstack(list(term_bounds.values()))
 
     def next_state_prior_func(self, z_lagged):
@@ -344,17 +344,17 @@ class TCLModel(Model):
         return jac
 
     def stage_ineq_constraint_func(self, xu_stage):
-        # T_zone = xu_stage[self.x_stage_indices[0]]
-        # g = [T_zone - self.parameters['T_zone_max'][self.simulation_step],
-        #      -T_zone + self.parameters['T_zone_min'][self.simulation_step]]
-        g = []
+        T_zone = xu_stage[self.x_stage_indices[0]]
+        g = [T_zone - self.parameters['T_zone_max'][self.simulation_step],
+             -T_zone + self.parameters['T_zone_min'][self.simulation_step]]
+        # g = []
         return np.array([g])
 
     def stage_ineq_constraint_jacobian(self, xu_stage):
-        # T_zone_idx = self.x_stage_indices[0]
-        jac = np.zeros((0, xu_stage.shape[0]))
-        # jac[0, T_zone_idx] = 1
-        # jac[1, T_zone_idx] = -1
+        T_zone_idx = self.x_stage_indices[0]
+        jac = np.zeros((2, xu_stage.shape[0]))
+        jac[0, T_zone_idx] = 1
+        jac[1, T_zone_idx] = -1
         return jac
 
 
