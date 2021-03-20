@@ -28,8 +28,8 @@ class PDOptimizationMethod:
         self.n_imp_dual_ineq_vars = len(self.ocp.imp_ineq_constraints)
         self.dual_ineq_constraint = []
         self.dual_eq_constraint = []
-        self.n_ineq_dual_vars = self.ocp.n_exp_ineq_constraints
-        self.n_eq_dual_vars = self.ocp.n_exp_eq_constraints
+        self.n_dual_ineq_vars = self.ocp.n_exp_ineq_constraints
+        self.n_dual_eq_vars = self.ocp.n_exp_eq_constraints
 
         self.set_dual_constraints()
 
@@ -58,18 +58,18 @@ class PDOptimizationMethod:
 
         primal_vars = lambda y: y[:self.n_primal_vars]
         horizon_cost = lambda y: norm(primal_vars(y) - np.array(x), ord=2)
-        imp_ineq_dual_vars = lambda y: y[self.n_primal_vars + self.n_imp_dual_eq_vars:]
+        imp_dual_ineq_vars = lambda y: y[self.n_primal_vars + self.n_imp_dual_eq_vars:]
         imp_ineq_funcs = lambda y: np.concatenate([con['fun'](primal_vars(y)) for con in ineq_cons])
-        imp_eq_dual_vars = lambda y: y[self.n_primal_vars:self.n_primal_vars + self.n_imp_dual_eq_vars]
+        imp_dual_eq_vars = lambda y: y[self.n_primal_vars:self.n_primal_vars + self.n_imp_dual_eq_vars]
         imp_eq_funcs = lambda y: np.concatenate([con['fun'](primal_vars(y))
                                                  for con in eq_cons])
 
         lagrangian = lambda y: \
             horizon_cost(y) \
-            + np.dot(imp_eq_dual_vars(y), imp_eq_funcs(y)) + \
-            + np.dot(imp_ineq_dual_vars(y), imp_ineq_funcs(y))
+            + np.dot(imp_dual_eq_vars(y), imp_eq_funcs(y)) + \
+            + np.dot(imp_dual_ineq_vars(y), imp_ineq_funcs(y))
         # self.primal_ineq_constraint_func(y[:self.n_primal_vars])) + \
-        # np.dot(y[self.n_primal_vars + self.n_ineq_dual_vars:],
+        # np.dot(y[self.n_primal_vars + self.n_dual_ineq_vars:],
         # self.primal_eq_constraint_func(y[:self.n_primal_vars]))
         return gradient_func(lagrangian, y)
 
@@ -104,7 +104,7 @@ class PDOptimizationMethod:
                                                       * np.ones(self.ocp.n_states)], axis=0)
 
         elif is_dual:
-            res_opt = np.max([res_opt, np.zeros(self.n_ineq_dual_vars)], axis=0)
+            res_opt = np.max([res_opt, np.zeros(self.n_dual_ineq_vars)], axis=0)
         else:
             # res_opt = minimize(lambda y: norm(y - np.array(x).T, ord=2), x0=x, constraints=eq_set_cons + ineq_set_cons,
             #                    options={'maxiter': 1000}, method=None, tol=1e-10).x
@@ -154,86 +154,98 @@ class PDOptimizationMethod:
         eps = options['eps']
         maxiter = options['maxiter']
         xtol = options['xtol']
+        maxiter_plus = maxiter #1000
+        k0 = options['args'][0]
 
         primal_vars = q_init[:self.n_primal_vars]
-        ineq_dual_vars = q_init[self.n_primal_vars:self.n_primal_vars + self.n_ineq_dual_vars]
-        eq_dual_vars = q_init[self.n_primal_vars + self.n_ineq_dual_vars:]
+        dual_ineq_vars = q_init[self.n_primal_vars:self.n_primal_vars + self.n_dual_ineq_vars]
+        dual_eq_vars = q_init[self.n_primal_vars + self.n_dual_ineq_vars:]
+        q_opt = np.hstack([primal_vars, dual_ineq_vars, dual_eq_vars])
 
         primal_vars_new = primal_vars
-        ineq_dual_vars_new = ineq_dual_vars
-        eq_dual_vars_new = eq_dual_vars
+        dual_ineq_vars_new = dual_ineq_vars
+        dual_eq_vars_new = dual_eq_vars
+        q_opt_new = q_opt
 
-        primal_vars_trajectory = []
-        dual_eq_vars_trajectory = []
-        dual_ineq_vars_trajectory = []
-        cost_trajectory = []
+        primal_vars_trajectory = [np.array(primal_vars_new)]
+        dual_eq_vars_trajectory = [np.array(dual_eq_vars_new)]
+        dual_ineq_vars_trajectory = [np.array(dual_ineq_vars_new)]
+        cost_trajectory = [self.ocp.horizon_cost(primal_vars_new, k0=k0)]
 
         primal_vars_change_trajectory = []
         dual_eq_vars_change_trajectory = []
         dual_ineq_vars_change_trajectory = []
 
-        k0 = options['args'][0]
+        online_tau = 0
+        tau = 0
+        is_online = True
+        while 1:
+        # while tau < maxiter:
 
-        for tau in range(maxiter):
-
-            alpha_vec = alpha #np.ones(self.n_primal_vars) * alpha
+            alpha_vec = alpha  # np.ones(self.n_primal_vars) * alpha
             # alpha_vec[0] = 0.005
 
-            # np.sum(self.ocp.horizon_cost_jacobian(primal_vars, k0=k0) - jacobian_func(self.ocp.horizon_cost, primal_vars))
-            # np.sum(self.ocp.next_state_constraint_jacobian(primal_vars, k0) - jacobian_func(self.ocp.next_state_constraint_func, primal_vars))
-            # np.sum(self.ocp.stage_ineq_constraint_jacobian(primal_vars, k0) - jacobian_func(self.ocp.stage_ineq_constraint_func, primal_vars))
+            # np.sum((self.ocp.horizon_cost_jacobian(primal_vars, k0=k0) - jacobian_func(self.ocp.horizon_cost, primal_vars))**2)
+            # np.sum((self.ocp.next_state_constraint_jacobian(primal_vars, k0) - jacobian_func(self.ocp.next_state_constraint_func, primal_vars))**2)
+            # np.sum((self.ocp.stage_ineq_constraint_jacobian(primal_vars, k0) - jacobian_func(self.ocp.stage_ineq_constraint_func, primal_vars))**2)
 
             primal_vars_new = self.proj(primal_vars -
-                                    alpha_vec * (self.ocp.horizon_cost_jacobian(primal_vars, k0=k0)[0]
-                                                 + np.dot(self.ocp.stage_ineq_constraint_jacobian(primal_vars, k0=k0).T,
-                                                          ineq_dual_vars)
-                                                 + np.dot(self.ocp.next_state_constraint_jacobian(primal_vars, k0=k0).T,
-                                                          eq_dual_vars)),
-                                    self.ocp.imp_eq_constraints, self.ocp.imp_ineq_constraints, is_primal=True)
+                                        alpha_vec * (self.ocp.horizon_cost_jacobian(primal_vars, k0=k0)[0]
+                                                     + np.dot(
+                        self.ocp.stage_ineq_constraint_jacobian(primal_vars, k0=k0).T, dual_ineq_vars)
+                                                     + np.dot(
+                        self.ocp.next_state_constraint_jacobian(primal_vars, k0=k0).T,
+                        dual_eq_vars)), self.ocp.imp_eq_constraints, self.ocp.imp_ineq_constraints, is_primal=True)
 
-            # if np.any(np.abs(primal_vars_new) > 40):
-            #     print(1)
+            cost_new = self.ocp.horizon_cost(primal_vars_new, k0=k0)
 
-            if ineq_dual_vars.shape[0]:
-                ineq_dual_vars_new = self.proj(ineq_dual_vars +
-                                           (eta_ineq * alpha *
-                                            (self.ocp.stage_ineq_constraint_func(primal_vars_new, k0=k0)
-                                             - (eps * (ineq_dual_vars - lambda_prior)))),
-                                           [], self.dual_ineq_constraint, is_dual=True)
-                dual_ineq_vars_trajectory.append(np.array(ineq_dual_vars))
-                dual_ineq_vars_change_trajectory.append(norm(ineq_dual_vars_new - ineq_dual_vars))
+            if dual_ineq_vars.shape[0]:
+                dual_ineq_vars_new = self.proj(dual_ineq_vars +
+                                               (eta_ineq * alpha *
+                                                (self.ocp.stage_ineq_constraint_func(primal_vars_new, k0=k0)
+                                                 - (eps * (dual_ineq_vars - lambda_prior)))),
+                                               [], self.dual_ineq_constraint, is_dual=True)
 
-            if eq_dual_vars.shape[0]:
-                # eta_vec = eta # np.ones(self.n_eq_dual_vars) * eta
+            if dual_eq_vars.shape[0]:
+                # eta_vec = eta # np.ones(self.n_dual_eq_vars) * eta
                 # eta_vec[1] = 0.1
-                eq_dual_vars_new = eq_dual_vars + (eta_eq * alpha *
-                                                    (self.ocp.next_state_constraint_func(primal_vars_new, k0=k0)
-                                                     - (eps * (eq_dual_vars - mu_prior))))
+                dual_eq_vars_new = dual_eq_vars + (eta_eq * alpha *
+                                                   (self.ocp.next_state_constraint_func(primal_vars_new, k0=k0)
+                                                    - (eps * (dual_eq_vars - mu_prior))))
 
-            primal_vars_trajectory.append(primal_vars_new)
-            dual_eq_vars_trajectory.append(eq_dual_vars_new)
-            cost_trajectory.append(self.ocp.horizon_cost(primal_vars_new, k0=k0))
+            if is_online:
+                primal_vars_trajectory.append(primal_vars_new)
+                dual_eq_vars_trajectory.append(dual_eq_vars_new)
+                dual_ineq_vars_trajectory.append(dual_ineq_vars)
+                cost_trajectory.append(cost_new)
+                primal_vars_change_trajectory.append(norm(primal_vars_new - primal_vars))
+                dual_eq_vars_change_trajectory.append(norm(dual_eq_vars_new - dual_eq_vars))
+                dual_ineq_vars_change_trajectory.append(norm(dual_ineq_vars_new - dual_ineq_vars))
+
+                if tau == maxiter - 1:
+                    is_online = False
+                    online_tau = tau
 
             # if cost_trajectory[-1] > 50:
             #     print(1)
-                # TODO check GP derivative of F, L and see if it needs to be clipped
-                # TODO check eq_dual_vars and see if it needs to be projected onto closed set
-                # TODO check variance of state gp predictions. If large can't trust gp.
+            # TODO check GP derivative of F, L and see if it needs to be clipped
+            # TODO check dual_eq_vars and see if it needs to be projected onto closed set
+            # TODO check variance of state gp predictions. If large can't trust gp.
 
-            primal_vars_change_trajectory.append(norm(primal_vars_new - primal_vars))
-            dual_eq_vars_change_trajectory.append(norm(eq_dual_vars_new - eq_dual_vars))
-            if norm((np.hstack([primal_vars_new, ineq_dual_vars_new, eq_dual_vars_new])
-                     - np.hstack([primal_vars, ineq_dual_vars, eq_dual_vars])), 2) < xtol:
+            # to convergence
+            q_opt_new = np.hstack([primal_vars_new, dual_ineq_vars_new, dual_eq_vars_new])
+            if (norm((q_opt_new - q_opt), 2) < xtol) or (tau == maxiter_plus):
                 break
 
             primal_vars = primal_vars_new
-            ineq_dual_vars = ineq_dual_vars_new
-            eq_dual_vars = eq_dual_vars_new
+            dual_ineq_vars = dual_ineq_vars_new
+            dual_eq_vars = dual_eq_vars_new
+            q_opt = q_opt_new
 
-        # self.regret = sum(cost_trajectory) - \
-        #               minimize(lambda z: self.ocp.horizon_cost(z, k0=k0), np.zeros(self.n_primal_vars),
-        #                        jac=self.ocp.horizon_cost_jacobian, constraints=self.ocp.constraints).fun
-        # self.ave_regret = self.regret / (tau + 1)
+            tau += 1
+
+        self.regret = cost_trajectory[-1] - cost_new
+        self.ave_regret = self.regret / (k0 + 1)
 
         self.primal_vars_change_trajectory = primal_vars_change_trajectory
         self.dual_ineq_vars_change_trajectory = dual_ineq_vars_change_trajectory
@@ -243,11 +255,9 @@ class PDOptimizationMethod:
         self.dual_eq_vars_trajectory = dual_eq_vars_trajectory
         self.cost_trajectory = cost_trajectory
 
-        z_opt = np.hstack([primal_vars, ineq_dual_vars, eq_dual_vars])
+        cost = cost_trajectory[-1]  # np.append(cost, self.ocp.horizon_cost(primal_vars))
 
-        cost = cost_trajectory[-1] # np.append(cost, self.ocp.horizon_cost(primal_vars))
-
-        res_opt = OptimizeResult(x=z_opt, fun=cost, nit=(tau + 1))
+        res_opt = OptimizeResult(x=q_opt_new, fun=cost, nit=(online_tau + 1))
         return res_opt
 
     def plot(self):
@@ -258,14 +268,18 @@ class PDOptimizationMethod:
         iters = np.arange(len(self.primal_vars_trajectory)).astype('int')
         iter_interval = len(iters) / 5
         conv_ax[-1].set_xlabel('$\\tau$')
-        conv_ax[0].plot(iters.astype('int'), self.primal_vars_change_trajectory)
-        conv_ax[0].set_ylabel('$\left \Vert \mathbf{{z_{\\tau  + 1}}} - \mathbf{{z_{\\tau}}} \\right \Vert_2$', rotation=0)
-        conv_ax[1].plot(iters, self.dual_eq_vars_change_trajectory)
-        conv_ax[1].set_ylabel('$\left \Vert \mathbf{{\mu_{\\tau  + 1}}} - \mathbf{{\mu_{\\tau}}} \\right \Vert_2$', rotation=0)
+        conv_ax[0].plot(iters[1:], self.primal_vars_change_trajectory)
+        conv_ax[0].set_ylabel('$\left \Vert \mathbf{{z_{\\tau  + 1}}} - \mathbf{{z_{\\tau}}} \\right \Vert_2$',
+                              rotation=0)
+        conv_ax[1].plot(iters[1:], self.dual_eq_vars_change_trajectory)
+        conv_ax[1].set_ylabel('$\left \Vert \mathbf{{\mu_{\\tau  + 1}}} - \mathbf{{\mu_{\\tau}}} \\right \Vert_2$',
+                              rotation=0)
 
         if self.ocp.n_exp_ineq_constraints:
-            conv_ax[2].plot(iters, self.dual_ineq_vars_change_trajectory)
-            conv_ax[2].set_ylabel('$\left \Vert \mathbf{{\lambda_{\\tau  + 1}}} - \mathbf{{\lambda_{\\tau}}} \\right \Vert_2$', rotation=0)
+            conv_ax[2].plot(iters[1:], self.dual_ineq_vars_change_trajectory)
+            conv_ax[2].set_ylabel(
+                '$\left \Vert \mathbf{{\lambda_{\\tau  + 1}}} - \mathbf{{\lambda_{\\tau}}} \\right \Vert_2$',
+                rotation=0)
 
         for ax in conv_ax:
             ax.spines['top'].set_visible(False)
@@ -287,14 +301,14 @@ class PDOptimizationMethod:
         var_ax[0].set_ylabel('$\mathbf{z_{\\tau}}$', rotation=0)
 
         dual_eq_vars_trajectory = np.vstack(self.dual_eq_vars_trajectory)
-        for v in range(self.n_eq_dual_vars):
+        for v in range(self.n_dual_eq_vars):
             var_ax[1].plot(iters, dual_eq_vars_trajectory[:, v], label=f"$\mathbf{{\mu_{{{v}}}}}$")
         var_ax[1].set_ylabel('$\mathbf{\mu_{\\tau}}$', rotation=0)
 
         ax_idx = 2
         if self.ocp.n_exp_ineq_constraints:
             dual_ineq_vars_trajectory = np.vstack(self.dual_ineq_vars_trajectory)
-            for v in range(self.n_ineq_dual_vars):
+            for v in range(self.n_dual_ineq_vars):
                 var_ax[ax_idx].plot(iters, dual_ineq_vars_trajectory[:, v], label=f"$\mathbf{{\lambda_{{{v}}}}}$")
             var_ax[ax_idx].set_ylabel('$\mathbf{\lambda_{\\tau}}$', rotation=0)
             ax_idx += 1

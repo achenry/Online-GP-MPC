@@ -500,8 +500,9 @@ def main(input_params):
                                                          n_samples=next_state_gps[f].n_init_training_samples,
                                                          is_init=True))
                         else:
-                            pass
-                        # TODO
+                            true_next_state_gps[f].set_kernel(
+                                true_next_state_gps[f].device.ref_state[true_next_state_gps[f].dim])
+                        # TODO vs only setting on high variance
 
                         # ref_weight = gp.y_train.shape[0]
                         # gp.prior_mean = np.mean(np.concatenate([model.devices[d].ref_state[dim] * np.ones(ref_weight),
@@ -679,7 +680,7 @@ if __name__ == '__main__':
             os.mkdir(dir)
 
     # run online TCL, offƒline IP and offline TCL simulations
-    sim_indices = [6, 7, 8]
+    sim_indices = [0]
     for sim_batch in sim_indices:
         sim_batch_data = []
         gp_batch_data = []
@@ -762,7 +763,7 @@ if __name__ == '__main__':
                 else:
                     comp_sim_df = None
 
-                traj_fig, error_fig, dual_fig = simulator.plot_trajectory(comp_sim_df,
+                traj_fig, error_fig, dual_fig, regret_fig = simulator.plot_trajectory(comp_sim_df,
                                                                           bounds=list(trajectory_bounds.values()),
                                                                           return_tracking_error=True)
                 conv_fig, conv_ax, var_fig, var_ax = simulator.plot_convergence()
@@ -770,6 +771,7 @@ if __name__ == '__main__':
                 error_fig.savefig(f'{sub_results_dirs[s]}/error_plot')
                 conv_fig.savefig(f'{sub_results_dirs[s]}/conv_plot')
                 var_fig.savefig(f'{sub_results_dirs[s]}/var_plot')
+                regret_fig.savefig(f'{sub_results_dirs[s]}/regret_plot')
 
         for g, gp in enumerate(np.array(gp_batch_data).flatten()):
             for ff, fig in enumerate(gp.prediction_figs):

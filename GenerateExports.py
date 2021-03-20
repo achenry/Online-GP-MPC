@@ -84,7 +84,7 @@ class GenerateExports:
 
     def copy_figures(self):
 
-        keywords = ['_gp_', 'traj_plot.png', 'var_plot.png', 'conv_plot.png', 'error_plot.png', 'gp_score.png'] # 'conv_plot.png'
+        keywords = ['_gp_', 'traj_plot.png', 'var_plot.png', 'conv_plot.png', 'error_plot.png', 'regret_plot.png', 'gp_score.png'] # 'conv_plot.png'
 
         for root, dirs, files in os.walk(f'{self.results_dir}'):
             for file in files:

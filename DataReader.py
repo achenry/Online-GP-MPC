@@ -398,7 +398,6 @@ class DataReader:
                                'is_init': [True if i < n_init_training_samples else False for i in training_indices] \
                                    if is_init else [False for i in training_indices]})
 
-        # TODO test
         df = pd.concat([new_df, df])
         return df
 

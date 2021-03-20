@@ -703,11 +703,11 @@ class NextStateGP(GP):
         self.length_scales = np.array([state_length_scales])
 
         self.kernels = None  # Matern(length_scale=2, nu=1.5)
-        self.set_kernel()
+        self.set_kernel() #self.set_kernel(self.device.ref_state[self.dim]) # TODO
 
     def set_kernel(self, const_add=0):
-        self.kernels = [ConstantKernel(self.output_variances[0]) * RBF(length_scale=self.length_scales[0])]
-                        # + ConstantKernel(constant_value=const_add)]
+        self.kernels = [ConstantKernel(self.output_variances[0]) * RBF(length_scale=self.length_scales[0])
+                        + ConstantKernel(constant_value=const_add)]
         # if add_const_kernel:
         #     for k in range(len(self.kernels)):
         #         self.kernels[k] = self.kernels[k] + ConstantKernel(constant_value=self.device.ref_state[self.output_dim])

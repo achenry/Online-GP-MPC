@@ -180,8 +180,9 @@ class Simulator:
                             next_state_gps, next_state_training_data_dfs,
                             k0)
 
-            self.ocp.true_disturbances = true_disturbances[k0:k0 + self.ocp.n_horizon].flatten()
-            # TODO change to np.concatentate([true_disturbances[k0], np.zeros(self.ocp.n_horizon - 1]),
+            self.ocp.true_disturbances = np.concatenate([true_disturbances[k0] for i in range(self.ocp.n_horizon)])
+                                                         # np.zeros((self.ocp.n_horizon - 1) * self.ocp.n_disturbances)]) #true_disturbances[k0:k0 + self.ocp.n_horizon].flatten()
+            # TODO change to ,
             #   because we don't know future disturbances - do we assume zero or equal to current disturbances?
 
 
@@ -223,11 +224,10 @@ class Simulator:
 
             ineq_constraint = [con['fun'](z_opt, k0)[:int(self.ocp.n_exp_ineq_constraints / self.ocp.n_horizon)]
                                for con in self.ocp.exp_ineq_constraints]
-            eq_constraint = [con['fun'](z_opt, k0)[:int(self.ocp.n_exp_eq_constraints / self.ocp.n_horizon)]
-                             for con in self.ocp.exp_eq_constraints]
+            # eq_constraint = [con['fun'](z_opt, k0)[:int(self.ocp.n_exp_eq_constraints / self.ocp.n_horizon)]
+            #                  for con in self.ocp.exp_eq_constraints]
 
             self.ineq_constraint_trajectory = np.vstack([self.ineq_constraint_trajectory, ineq_constraint])
-            self.eq_constraint_trajectory = np.vstack([self.eq_constraint_trajectory, eq_constraint])
             self.ineq_dual_trajectory = np.vstack([self.ineq_dual_trajectory, lambda_opt])
             self.eq_dual_trajectory = np.vstack([self.eq_dual_trajectory, mu_opt])
 
@@ -273,19 +273,23 @@ class Simulator:
             modelled_next_state, modelled_next_state_std = self.modelled_next_state_func(z_opt, k0)
             self.modelled_state_trajectory.append((modelled_next_state, modelled_next_state_std))
 
-            update_x0 = False
-            for g, gp in enumerate(true_next_state_gps):
-                if gp is not None:
-                    d = self.model.devices.index(gp.device)
-                    dim = self.model.device_xstage_indices[d]
-                    if x0_std[dim] >= 1:
-                        gp.prior_mean = gp.device.ref_state[gp.dim]  # + self.state_trajectory[-1, dim]) / 2
-                        update_x0 = True
-                    gp.set_kernel(gp.device.ref_state[gp.dim])
+            eq_constraint = (x0 - self.ocp.next_state_func(z_lagged))
+            self.eq_constraint_trajectory = np.vstack([self.eq_constraint_trajectory, eq_constraint])
 
-            if update_x0:
-                x0 = self.true_next_state_func(z_lagged=z_lagged, k=k0,
-                                               is_synthetic_data=synthetic_state_data)
+            # TODO
+            # update_x0 = False
+            # for g, gp in enumerate(true_next_state_gps):
+            #     if gp is not None:
+            #         d = self.model.devices.index(gp.device)
+            #         dim = self.model.device_xstage_indices[d]
+            #         if x0_std[dim] >= 1:
+            #             gp.prior_mean = gp.device.ref_state[gp.dim]  # + self.state_trajectory[-1, dim]) / 2
+            #             update_x0 = True
+            #         gp.set_kernel(gp.device.ref_state[gp.dim])
+            #
+            # if update_x0:
+            #     x0 = self.true_next_state_func(z_lagged=z_lagged, k=k0,
+            #                                    is_synthetic_data=synthetic_state_data)
 
             next_state_gp_scores = []
             for g, gp in enumerate(next_state_gps):
@@ -375,8 +379,8 @@ class Simulator:
             # x0 = np.max([np.min([modelled_next_state, x0 + 2], axis=0), x0 - 2], axis=0)
             # x0 = z0[self.ocp.n_inputs:self.ocp.n_inputs + self.ocp.n_states]
 
-            # self.regret_trajectory = np.vstack([self.regret_trajectory, self.mpc.opt_object.regret])
-            # self.ave_regret_trajectory = np.vstack([self.ave_regret_trajectory, self.mpc.opt_object.ave_regret])
+            self.regret_trajectory = np.vstack([self.regret_trajectory, self.mpc.opt_object.regret])
+            self.ave_regret_trajectory = np.vstack([self.ave_regret_trajectory, self.mpc.opt_object.ave_regret])
 
             print(f'\nTime-Step == {k0}\n'
                   f'primal variables == {z_opt}\n'
@@ -409,6 +413,7 @@ class Simulator:
         self.error_fig, self.error_ax = plt.subplots(n_plots, sharex=True, frameon=False)
         self.traj_fig, self.traj_ax = plt.subplots(n_plots, sharex=True, frameon=False)
         self.dual_fig, self.dual_ax = plt.subplots(2, sharex=True, frameon=False)
+        self.regret_fig, self.regret_ax = plt.subplots(2, sharex=True, frameon=False)
 
         self.dual_fig.align_ylabels()
         self.dual_ax[-1].set_xlabel('time-step')
@@ -420,11 +425,16 @@ class Simulator:
         self.traj_ax[0].set_ylabel('$\mathbf{x_0}$', rotation=0)
         self.traj_ax[1].set_ylabel('$\mathbf{u_0}$', rotation=0)
         self.traj_ax[2].set_ylabel('L', rotation=0)
-        # self.traj_ax[3].set_ylabel('regret', rotation=0)
-        # self.traj_ax[4].set_ylabel('average regret', rotation=0)
         self.traj_ax[3].set_ylabel('F', rotation=0)
         if self.ocp.n_exp_ineq_constraints:
             self.traj_ax[4].set_ylabel('G', rotation=0)
+
+        self.regret_ax[-1].set_xlabel('time-step')
+        self.regret_ax[0].set_ylabel('regret', rotation=0)
+        self.regret_ax[1].set_ylabel('average regret', rotation=0)
+
+        self.regret_ax[0].plot(time_series, self.regret_trajectory)
+        self.regret_ax[1].plot(time_series, self.ave_regret_trajectory)
 
         if comp_sim_df is not None:
             comp_state_trajectory = np.vstack(comp_sim_df.x0.values)
@@ -513,7 +523,7 @@ class Simulator:
         for c in range(self.ocp.n_exp_eq_constraints):
             self.dual_ax[1].plot(time_series, self.eq_dual_trajectory[:, c])
 
-        for a, ax in enumerate(np.concatenate([self.traj_ax, self.error_ax, self.dual_ax])):
+        for a, ax in enumerate(np.concatenate([self.traj_ax, self.error_ax, self.dual_ax, self.regret_ax])):
             ax.set_xticks(xticks)
             ax.spines['top'].set_visible(False)
             ax.spines['right'].set_visible(False)
@@ -539,10 +549,11 @@ class Simulator:
         self.traj_fig.show()
         for ax in self.traj_ax:
             ax.set_position(ax.get_position())
+        self.regret_fig.show()
         # self.error_fig.show()
         # self.dual_fig.show()
 
-        return self.traj_fig, self.error_fig, self.dual_fig
+        return self.traj_fig, self.error_fig, self.dual_fig, self.regret_fig
 
     def plot_convergence(self):
         opt_object = self.mpc.opt_object

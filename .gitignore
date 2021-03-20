@@ -1,4 +1,5 @@
 ./venv/
+venv/*
 ./results/
 ./network/
 ./gd_plots/
